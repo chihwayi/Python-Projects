@@ -1,0 +1,1 @@
+Error processing /home/devoop/Documents/eHR/mutare/TDH100123.sql: Command '['docker', 'exec', '-i', 'mysql', 'sh', '-c', 'mysql --binary-mode=1 -u root -proot  < /tmp/backup.sql']' returned non-zero exit status 1.
