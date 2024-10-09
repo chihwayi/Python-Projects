@@ -17,7 +17,7 @@ source_db_config = {
 
 target_db_config = {
     'user': 'root',
-    'password': 'root',
+    'password': '',
     'host': 'localhost',
     'database': 'hivdatabase'
 }
@@ -64,6 +64,17 @@ def get_username(metadata):
         return match.group(1)
     else:
         return None
+
+def create_tables_from_file(sql_file_path):
+    with open(sql_file_path, 'r') as file:
+        sql_commands = file.read()
+
+    with target_engine.connect() as connection:
+        for command in sql_commands.split(';'):
+            if command.strip():
+                connection.execute(text(command))
+
+    print("Tables created and data inserted successfully.")
 
 def process_site_information_data():
     metadata_query = "SELECT meta_data FROM mrs.domain_event_entry WHERE time_stamp = (SELECT MAX(time_stamp) FROM mrs.domain_event_entry)"
@@ -134,6 +145,8 @@ def load_sql_file_into_mysql(sql_file, container_name, db_name, root_password):
             write_processed_file_to_backup(sql_file)
 
             process_all_data()
+
+            create_tables_from_file('User.sql')
 
         except subprocess.CalledProcessError as e:
             error_message = f"Error processing {sql_file}: {e}"
