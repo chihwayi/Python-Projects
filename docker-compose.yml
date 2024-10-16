@@ -1,9 +1,23 @@
-version: '3.1'
+version: '3.8'
+
 services:
   db:
     image: mysql:latest
+    container_name: mysql_db
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: root            # Optional: specify a user
+      MYSQL_PASSWORD: root   # Optional: specify the user's password
     ports:
       - "3308:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - db_network
+
+networks:
+  db_network:
+
+volumes:
+  db_data:

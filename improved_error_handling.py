@@ -10,7 +10,7 @@ import logging
 # Database connection details
 source_db_config = {
     'user': 'root',
-    'password': 'root',
+    'password': '',
     'host': 'localhost',
     'database': ''
 }
@@ -65,9 +65,34 @@ def get_username(metadata):
     else:
         return None
 
-def create_tables_from_file(sql_file_path):
+def create_tables_from_file(sql_file_path, engine):
+    # Open the SQL file and read its contents
     with open(sql_file_path, 'r') as file:
         sql_commands = file.read()
+
+    # Split the file content into individual SQL statements
+    sql_statements = sql_commands.split(';')
+    
+    with engine.connect() as connection:
+        for statement in sql_statements:
+            # Clean up any leading/trailing spaces
+            statement = statement.strip()
+
+            # Only process non-empty statements
+            if statement:
+                # Check if it's a CREATE TABLE command
+                if statement.upper().startswith('CREATE TABLE'):
+                    # Modify the statement to add "IF NOT EXISTS"
+                    statement = re.sub(r'CREATE TABLE\s+', 'CREATE TABLE IF NOT EXISTS ', statement, flags=re.IGNORECASE)
+                
+                # Execute the SQL statement
+                try:
+                    connection.execute(text(statement))
+                    print(f"Executed: {statement[:50]}...")  # Print the first 50 characters for debugging
+                except Exception as e:
+                    print(f"Error executing statement: {statement[:50]}...")
+                    logging.error(f"Error executing statement: {statement[:50]}... Error: {e}")
+
 
     with target_engine.connect() as connection:
         for command in sql_commands.split(';'):
@@ -139,7 +164,13 @@ def load_sql_file_into_mysql(sql_file, container_name, db_name, root_password):
             subprocess.run(["docker", "cp", sql_file, f"{container_name}:/tmp/backup.sql"], check=True)
             env = os.environ.copy()
             env['MYSQL_PWD'] = root_password
-            command = f"mysql --binary-mode=1 -u root -p{root_password} {db_name} < /tmp/backup.sql"
+            
+            # Conditionally construct the command
+            if root_password:
+                command = f"mysql --binary-mode=1 -u root -p{root_password} {db_name} < /tmp/backup.sql"
+            else:
+                command = f"mysql --binary-mode=1 -u root {db_name} < /tmp/backup.sql"
+            
             subprocess.run(["docker", "exec", "-i", container_name, "sh", "-c", command], check=True, env=env)
 
             write_processed_file_to_backup(sql_file)
