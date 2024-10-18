@@ -3,9 +3,11 @@ import re
 import subprocess
 import pymysql
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.exc import IntegrityError
 import logging
+
+pd.set_option('future.no_silent_downcasting', True)
 
 # Database connection details
 source_db_config = {
@@ -72,7 +74,13 @@ def create_tables_from_file(sql_file_path, engine):
 
     # Split the file content into individual SQL statements
     sql_statements = sql_commands.split(';')
-    
+
+    # Get existing table names in the target database
+    existing_tables = set()
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+
     with engine.connect() as connection:
         for statement in sql_statements:
             # Clean up any leading/trailing spaces
@@ -82,24 +90,28 @@ def create_tables_from_file(sql_file_path, engine):
             if statement:
                 # Check if it's a CREATE TABLE command
                 if statement.upper().startswith('CREATE TABLE'):
-                    # Modify the statement to add "IF NOT EXISTS"
-                    statement = re.sub(r'CREATE TABLE\s+', 'CREATE TABLE IF NOT EXISTS ', statement, flags=re.IGNORECASE)
-                
+                    # Extract the table name from the statement
+                    table_name = re.search(r'CREATE TABLE\s+`?(\w+)`?', statement, flags=re.IGNORECASE)
+                    
+                    if table_name:
+                        table_name = table_name.group(1)
+                        # Check if the table already exists
+                        if table_name in existing_tables:
+                            # print(f"Table '{table_name}' already exists. Skipping creation.")
+                            continue  # Skip this statement if the table exists
+
+                        # Modify the statement to add "IF NOT EXISTS"
+                        statement = re.sub(r'CREATE TABLE\s+', 'CREATE TABLE IF NOT EXISTS ', statement, flags=re.IGNORECASE)
+
                 # Execute the SQL statement
                 try:
                     connection.execute(text(statement))
-                    print(f"Executed: {statement[:50]}...")  # Print the first 50 characters for debugging
+                    print(f"Executed: {statement[:10]}...")  # Print the first 10 characters for debugging
                 except Exception as e:
-                    print(f"Error executing statement: {statement[:50]}...")
-                    logging.error(f"Error executing statement: {statement[:50]}... Error: {e}")
+                    print(f"Error executing statement: {statement[:10]}...")
+                    logging.error(f"Error executing statement: {statement[:10]}... Error: {e}")
 
-
-    with target_engine.connect() as connection:
-        for command in sql_commands.split(';'):
-            if command.strip():
-                connection.execute(text(command))
-
-    print("Tables created and data inserted successfully.")
+    print("Tables checked and created if not already present.")
 
 def process_site_information_data():
     metadata_query = "SELECT meta_data FROM mrs.domain_event_entry WHERE time_stamp = (SELECT MAX(time_stamp) FROM mrs.domain_event_entry)"
@@ -120,22 +132,30 @@ def create_database_if_not_exists(config):
 
 # Function to create table based on DataFrame structure with primary keys
 def create_table_from_df(engine, df, table_name, primary_key_columns):
+    # MySQL data type mappings for pandas dtypes
     mysql_data_types = {
         'int64': 'INT',
         'float64': 'FLOAT',
         'bool': 'TINYINT(1)',  # Assuming boolean values
+        'bit': 'TINYINT(1)',  # Assuming boolean values
         'category': 'VARCHAR(255)',  # Assuming category type is stored as string
         'object': 'VARCHAR(255)',
-        'datetime64[ns]': 'DATETIME',  # Changed from DATE to DATETIME to accommodate time as well
+        'datetime64[ns]': 'DATE',  # Mapping pandas datetime to MySQL DATE
         'date': 'DATE',  # Explicitly mapping pandas date type to MySQL DATE type
         'timedelta64[ns]': 'TIME',  # Handling timedelta for time-only fields
         'str': 'VARCHAR(255)',  # Added explicit mapping for string type
-        'np.datetime64': 'DATETIME',  # Explicitly handling numpy datetime objects
+        'np.datetime64': 'DATE',  # Explicitly handling numpy datetime objects
         'np.timedelta64': 'TIME'  # Explicitly handling numpy timedelta objects
     }
+    
+    # Build the column definitions for the table
     columns = ", ".join([f"{col} {mysql_data_types[str(df[col].dtype)]}" for col in df.columns])
     primary_key = ", ".join(primary_key_columns)
+    
+    # Create table query
     create_table_query = f"CREATE TABLE IF NOT EXISTS {table_name} ({columns}, PRIMARY KEY ({primary_key}))"
+    
+    # Execute the create table query
     with engine.connect() as connection:
         connection.execute(text(create_table_query))
 
@@ -177,7 +197,7 @@ def load_sql_file_into_mysql(sql_file, container_name, db_name, root_password):
 
             process_all_data()
 
-            create_tables_from_file('User.sql')
+            create_tables_from_file('User.sql', target_engine)
 
         except subprocess.CalledProcessError as e:
             error_message = f"Error processing {sql_file}: {e}"
@@ -243,6 +263,11 @@ def process_anc_booked_register_data():
 def process_hts_register_data():
     hiv_query = "SELECT *,`date` AS hts_date FROM report.hts_register"
     hts_register_df = pd.read_sql(hiv_query, source_engine)
+
+    bool_columns = ['already_on_art', 'already_positive', 'couple', 'group_education', 'lactating', 'opt', 'post_test_counselling', 'pre_test_counselling', 'pregnant', 'results_issued', 'retest', 'client_assisted_self_test', 'client_tested_on_site']
+    for col in bool_columns:
+        hts_register_df[col] = hts_register_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, hts_register_df, 'hts_register', ['hts_id', 'hts_date'])
     insert_data_ignore_duplicates(target_engine, hts_register_df, 'hts_register', ['hts_id', 'hts_date'])
 
@@ -259,6 +284,11 @@ def process_hts_screening_register_data():
     hts_screening_query = "SELECT *,`result` AS hts_screening_result FROM report.hts_screening_register"
     hts_screening_df = pd.read_sql(hts_screening_query, source_engine)
     hts_screening_df['site_id'] = site_id
+
+    bool_columns = ['art', 'been_on_prep', 'tested_before']
+    for col in bool_columns:
+        hts_screening_df[col] = hts_screening_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, hts_screening_df, 'hts_screening_register', ['hts_screening_id', 'patient_id'])
     insert_data_ignore_duplicates(target_engine, hts_screening_df, 'hts_screening_register', ['hts_screening_id', 'patient_id'])
 
@@ -273,6 +303,11 @@ def process_hts_register_test_data():
 def process_art_register_data():
    art_query = "SELECT * FROM report.art_register"
    art_df = pd.read_sql(art_query, source_engine)
+
+   bool_columns = ['consent_to_personal_follow_up', 'cyanosis', 'enlarged_lymph_node', 'jaundice', 'pallor']
+   for col in bool_columns:
+        art_df[col] = art_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
    create_table_from_df(target_engine, art_df, 'art_register', ['art_id', 'person_id'])
    insert_data_ignore_duplicates(target_engine, art_df, 'art_register', ['art_id', 'person_id'])
 
@@ -340,6 +375,11 @@ def process_viral_load_data():
     viral_load_query = "SELECT * FROM report.viral_load_investigation_register"
     viral_load_df = pd.read_sql(viral_load_query, source_engine)
     viral_load_df['site_id'] = site_id
+
+    bool_columns = ['result_issued'] 
+    for col in bool_columns:
+        viral_load_df[col] = viral_load_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, viral_load_df, 'viral_load_investigation', ['laboratory_investigation_id', 'date'])
     insert_data_ignore_duplicates(target_engine, viral_load_df, 'viral_load_investigation', ['laboratory_investigation_id', 'date'])
 
@@ -347,6 +387,11 @@ def process_viral_load_data():
 def process_tpt_screening_data():
     tpt_screening_query = "SELECT * FROM report.tpt_screening_report"
     tpt_screening_df = pd.read_sql(tpt_screening_query, source_engine)
+
+    bool_columns = ['completed_ipt_in_the_last_three_years', 'eligible', 'heavy_alcohol_use', 'patient_currently_on_tb_treatment', 'severe_peripheral_neuropathy', 'sign_and_symptoms_of_active_tb', 'signs_of_active_liver_disease'] 
+    for col in bool_columns:
+        tpt_screening_df[col] = tpt_screening_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, tpt_screening_df, 'tpt_screening', ['patient_tpt_screening_id', 'date'])
     insert_data_ignore_duplicates(target_engine, tpt_screening_df, 'tpt_screening', ['patient_tpt_screening_id', 'date'])
 
@@ -354,6 +399,11 @@ def process_tpt_screening_data():
 def process_anc_visit_data():
     anc_visit_query = "SELECT * FROM report.anc_visit_register"
     anc_visit_df = pd.read_sql(anc_visit_query, source_engine)
+
+    bool_columns = ['calcium_supplement', 'history_visit', 'protein_supplement'] 
+    for col in bool_columns:
+        anc_visit_df[col] = anc_visit_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, anc_visit_df, 'anc_visit', ['anc_visit_id', 'anc_id'])
     insert_data_ignore_duplicates(target_engine, anc_visit_df, 'anc_visit', ['anc_visit_id', 'anc_id'])
 
@@ -370,6 +420,11 @@ def process_art_appointment_data():
 def process_cbs_data():
     cbs_query = "SELECT * FROM report.cbs_register"
     cbs_df = pd.read_sql(cbs_query, source_engine)
+
+    bool_columns = ['biological_mother_alive', 'breast_feeding', 'currently_breastfeeding_infant', 'not_pregnant_orbreastfeeding', 'offline', 'pregnant', 'submitted']
+    for col in bool_columns:
+        cbs_df[col] = cbs_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
     create_table_from_df(target_engine, cbs_df, 'cbs', ['person_id', 'site_id'])
     insert_data_ignore_duplicates(target_engine, cbs_df, 'cbs', ['person_id', 'site_id'])
 
@@ -406,6 +461,19 @@ def process_investigation_register_data():
     investigation_register_query = "SELECT * FROM report.investigation_register"
     investigation_register_df = pd.read_sql(investigation_register_query, source_engine)
     investigation_register_df['site_id'] = site_id
+
+    date_columns = ['date', 'result_date', 'date_result_issued'] 
+    for col in date_columns:
+        investigation_register_df[col] = pd.to_datetime(investigation_register_df[col], errors='coerce')
+
+    bool_columns = ['result_issued'] 
+    for col in bool_columns:
+        investigation_register_df[col] = investigation_register_df[col].fillna(False).astype('bool').infer_objects(copy=False)
+
+    int_columns = ['month', 'year']
+    for col in int_columns:
+        investigation_register_df[col] = investigation_register_df[col].fillna(0).astype('int')
+
     create_table_from_df(target_engine, investigation_register_df, 'investigation_register', ['laboratory_investigation_id', 'site_id'])
     insert_data_ignore_duplicates(target_engine, investigation_register_df, 'investigation_register', ['laboratory_investigation_id', 'site_id'])
 
