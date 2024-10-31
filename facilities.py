@@ -29,8 +29,6 @@ merged_df = merged_df.merge(df_province, left_on=merged_df['facility_id'].str[:4
 column_order = ['facility_id', 'district_id', 'province_id', 'longitude', 'latitude', 'impilo_code', 'dhis_code', 'facility_name', 'district_name', 'province_name']
 merged_df = merged_df[column_order]
 
-print(merged_df.head())
-
 Base = declarative_base()
 
 class Facility(Base):
