@@ -14,7 +14,7 @@ conn1 = engine1.connect()
 # Query the three tables
 query_province = "SELECT province_id, name AS province_name FROM province"
 query_district = "SELECT district_id, name AS district_name FROM district"
-query_facility = "SELECT facility_id, name AS facility_name, longitude, latitude, impilo_code, dhis_code FROM facility"
+query_facility = "SELECT facility_id AS site_id, name AS facility_name, longitude, latitude, impilo_code, dhis_code FROM facility"
 
 # Read the results into DataFrames
 df_province = pd.read_sql_query(query_province, engine)
@@ -22,18 +22,18 @@ df_district = pd.read_sql_query(query_district, engine)
 df_facility = pd.read_sql_query(query_facility, engine)
 
 # Merge data
-merged_df = df_facility.merge(df_district, left_on=df_facility['facility_id'].str[:6], right_on='district_id')
-merged_df = merged_df.merge(df_province, left_on=merged_df['facility_id'].str[:4], right_on='province_id')
+merged_df = df_facility.merge(df_district, left_on=df_facility['site_id'].str[:6], right_on='district_id')
+merged_df = merged_df.merge(df_province, left_on=merged_df['site_id'].str[:4], right_on='province_id')
 
 # Reorder columns
-column_order = ['facility_id', 'district_id', 'province_id', 'longitude', 'latitude', 'impilo_code', 'dhis_code', 'facility_name', 'district_name', 'province_name']
+column_order = ['site_id', 'district_id', 'province_id', 'longitude', 'latitude', 'impilo_code', 'dhis_code', 'facility_name', 'district_name', 'province_name']
 merged_df = merged_df[column_order]
 
 Base = declarative_base()
 
 class Facility(Base):
     __tablename__ = 'facility'
-    facility_id = Column(String(255), primary_key=True)
+    site_id = Column(String(255), primary_key=True)
     district_id = Column(String(255))
     province_id = Column(String(255))
     longitude = Column(String(255))
@@ -45,12 +45,12 @@ class Facility(Base):
     province_name = Column(String(255))
 
     def __repr__(self):
-        return f"Facility(facility_id='{self.facility_id}', district_id='{self.district_id}')"
+        return f"Facility(site_id='{self.site_id}', district_id='{self.district_id}')"
 
 def backup_data(df, filename):
     backup_script = "CREATE TABLE IF NOT EXISTS facility (\n"
     columns = [f"{col} VARCHAR(255)" for col in df.columns]
-    columns[0] += " PRIMARY KEY"  # Set the primary key for facility_id
+    columns[0] += " PRIMARY KEY"  # Set the primary key for site_id
     backup_script += ",\n".join(columns)
     backup_script += "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8;\n\n"
 
