@@ -2,3 +2,5 @@
 .venv
 hiv/
 hiv
+database_processing.log
+*.txt
