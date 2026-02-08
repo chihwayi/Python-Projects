@@ -5,21 +5,31 @@ import mysql.connector
 from pathlib import Path
 from sqlalchemy import create_engine
 
+# Get data directory from environment
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+
 def connect_to_db():
     """Establish and return a database connection."""
     return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        passwd="root",
-        database="ctc2data",
-        auth_plugin="mysql_native_password",
+        host=os.environ.get("DB_HOST", "localhost"),
+        user=os.environ.get("DB_USER", "root"),
+        password=os.environ.get("DB_PASSWORD", "root"),
+        database=os.environ.get("DB_NAME", "ctc2data"),
         use_unicode=True, 
-        charset="utf8"
+        charset="utf8",
+        ssl_disabled=True
     )
 
 def get_sqlalchemy_engine():
     """Create and return a SQLAlchemy engine for pandas."""
-    return create_engine("mysql+pymysql://root:root@localhost/ctc2data")
+    user = os.environ.get("DB_USER", "root")
+    pwd = os.environ.get("DB_PASSWORD", "root")
+    host = os.environ.get("DB_HOST", "localhost")
+    db = os.environ.get("DB_NAME", "ctc2data")
+    return create_engine(
+        f"mysql+pymysql://{user}:{pwd}@{host}/{db}",
+        connect_args={'ssl_disabled': True}
+    )
 
 def get_facility_info(engine):
     """Get facility information and return formatted data."""
@@ -139,8 +149,8 @@ def process_tb_screening(engine, facility_info):
     sanitized_name = str(facility_name)[:45].replace('/', '_')
     
     # Export to CSV
-    output_dir = Path('/home/devoop/Documents/Datasets/tb screening')
-    output_dir.mkdir(exist_ok=True)
+    output_dir = Path(DATA_DIR) / 'tb screening'
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     output_file = output_dir / f"{sanitized_name}.csv"
     data_combined.to_csv(output_file, encoding='utf-8', index=False)
@@ -153,8 +163,8 @@ def process_retention(engine, facility_info, facility_name):
     print("Processing retention data...")
     
     # Create output directory
-    output_dir = Path(f"/home/devoop/Documents/Datasets/retention/{facility_name}")
-    output_dir.mkdir(exist_ok=True, parents=True)
+    output_dir = Path(DATA_DIR) / 'retention' / facility_name
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Define tables to export
     tables = [
@@ -211,8 +221,9 @@ def main():
         # Get facility information
         facility_info = get_facility_info(engine)
         if facility_info.empty:
-            print("No facility information found.")
-            return
+            print("Error: No facility information found in the database. Ensure tblconfig is populated.")
+            import sys
+            sys.exit(1)
         
         print(f"Found facility information: {facility_info.iloc[0].to_dict()}")
         
@@ -228,6 +239,9 @@ def main():
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        # Exit with error code so the processor knows it failed
+        import sys
+        sys.exit(1)
         
     finally:
         if conn and conn.is_connected():

@@ -22,25 +22,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DATABASE_FOLDER = "/home/devoop/Documents/Datasets/data/databases"  # Directory containing all the database files
-PROCESSED_FOLDER = "/home/devoop/Documents/Datasets/data/processed_databases"  # Where to move databases after processing
-BACKUP_FOLDER = "/home/devoop/Documents/Datasets/data/backup_databases"  # Backup of databases before processing
-TEMPLATE_DATABASE = "/home/devoop/Documents/Datasets/data/template_database/blank.sql"  # Path to your template database with setup tables
-ETL_SCRIPT_PATH = "data_extraction.py"  #script
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+DATABASE_FOLDER = os.path.join(DATA_DIR, "databases")
+PROCESSED_FOLDER = os.path.join(DATA_DIR, "processed_databases")
+BACKUP_FOLDER = os.path.join(DATA_DIR, "backup_databases")
+TEMPLATE_DATABASE = os.path.join(DATA_DIR, "template_database/blank.sql")
+ETL_SCRIPT_PATH = "data_extraction.py"  # script in the same directory
+
 MYSQL_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "root",
-    "database": "ctc2data"  # Default database name
+    "host": os.environ.get("DB_HOST", "localhost"),
+    "user": os.environ.get("DB_USER", "root"),
+    "password": os.environ.get("DB_PASSWORD", "root"),
+    "database": os.environ.get("DB_NAME", "ctc2data")
 }
 
 class DatabaseProcessor:
     def __init__(self):
         self.create_folders()
-        # Validate that template database exists
+        # Check if template database exists, but don't crash immediately if we are just setting up
+        # We'll log a warning instead, as the user might create it later
         if not Path(TEMPLATE_DATABASE).exists():
-            logger.error(f"Template database not found at {TEMPLATE_DATABASE}")
-            raise FileNotFoundError(f"Template database file not found: {TEMPLATE_DATABASE}")
+            logger.warning(f"Template database not found at {TEMPLATE_DATABASE}")
+            # Ensure the directory exists at least
+            Path(TEMPLATE_DATABASE).parent.mkdir(parents=True, exist_ok=True)
     
     def create_folders(self):
         """Create necessary folders if they don't exist."""
@@ -99,7 +103,8 @@ class DatabaseProcessor:
             conn = mysql.connector.connect(
                 host=MYSQL_CONFIG["host"],
                 user=MYSQL_CONFIG["user"],
-                password=MYSQL_CONFIG["password"]
+                password=MYSQL_CONFIG["password"],
+                ssl_disabled=True
             )
             cursor = conn.cursor()
             
@@ -112,27 +117,32 @@ class DatabaseProcessor:
             conn.close()
             
             # Now load the template database using a file redirection approach that handles spaces
-            with open(TEMPLATE_DATABASE, 'r') as template_file:
-                mysql_cmd = [
-                    'mysql',
-                    f"--host={MYSQL_CONFIG['host']}",
-                    f"--user={MYSQL_CONFIG['user']}",
-                    f"--password={MYSQL_CONFIG['password']}",
-                    MYSQL_CONFIG['database']
-                ]
+            if Path(TEMPLATE_DATABASE).exists():
+                with open(TEMPLATE_DATABASE, 'r') as template_file:
+                    mysql_cmd = [
+                        'mysql',
+                        f"--host={MYSQL_CONFIG['host']}",
+                        f"--user={MYSQL_CONFIG['user']}",
+                        f"--password={MYSQL_CONFIG['password']}",
+                        "--skip-ssl",
+                        MYSQL_CONFIG['database']
+                    ]
+                    
+                    result = subprocess.run(
+                        mysql_cmd,
+                        stdin=template_file,
+                        capture_output=True,
+                        text=True
+                    )
                 
-                result = subprocess.run(
-                    mysql_cmd,
-                    stdin=template_file,
-                    capture_output=True,
-                    text=True
-                )
-            
-            if result.returncode != 0:
-                logger.error(f"Failed to load template database: {result.stderr}")
-                return False
+                if result.returncode != 0:
+                    logger.error(f"Failed to load template database: {result.stderr}")
+                    return False
+                    
+                logger.info("Template database loaded successfully")
+            else:
+                logger.warning("Template database file not found. Proceeding with empty database.")
                 
-            logger.info("Template database loaded successfully")
             return True
             
         except mysql.connector.Error as err:
@@ -156,6 +166,7 @@ class DatabaseProcessor:
                         f"--host={MYSQL_CONFIG['host']}",
                         f"--user={MYSQL_CONFIG['user']}",
                         f"--password={MYSQL_CONFIG['password']}",
+                        "--skip-ssl",
                         MYSQL_CONFIG['database']
                     ]
                     
@@ -166,9 +177,9 @@ class DatabaseProcessor:
                         text=True
                     )
                 
-            elif file_extension in ['.csv', '.xlsx', '.xls']:
-                # Add custom import logic for different file types if needed
-                logger.warning(f"File type {file_extension} not directly supported for MySQL import")
+            elif file_extension in ['.csv', '.xlsx', '.xls', '.dta']:
+                # These are likely output files or data files, not database dumps
+                logger.info(f"Skipping {file_extension} file {db_path.name} as it is not a SQL database dump.")
                 return False
                 
             else:
@@ -188,10 +199,14 @@ class DatabaseProcessor:
     def run_etl_script(self):
         """Run the ETL script on the loaded database."""
         try:
+            # Pass environment variables to the subprocess
+            env = os.environ.copy()
+            
             result = subprocess.run(
                 [sys.executable, ETL_SCRIPT_PATH],
                 capture_output=True,
-                text=True
+                text=True,
+                env=env
             )
             
             if result.returncode != 0:
@@ -275,7 +290,8 @@ def create_template_database():
     conn = mysql.connector.connect(
         host=MYSQL_CONFIG["host"],
         user=MYSQL_CONFIG["user"],
-        password=MYSQL_CONFIG["password"]
+        password=MYSQL_CONFIG["password"],
+        ssl_disabled=True
     )
     cursor = conn.cursor()
     
@@ -293,6 +309,7 @@ def create_template_database():
                 f"--host={MYSQL_CONFIG['host']}",
                 f"--user={MYSQL_CONFIG['user']}",
                 f"--password={MYSQL_CONFIG['password']}",
+                "--skip-ssl",
                 temp_db
             ]
             subprocess.run(mysql_cmd, stdin=source_file)
@@ -307,6 +324,7 @@ def create_template_database():
                 f"--host={MYSQL_CONFIG['host']}",
                 f"--user={MYSQL_CONFIG['user']}",
                 f"--password={MYSQL_CONFIG['password']}",
+                "--skip-ssl",
                 '--no-data',
                 temp_db
             ]
@@ -319,6 +337,7 @@ def create_template_database():
                 f"--host={MYSQL_CONFIG['host']}",
                 f"--user={MYSQL_CONFIG['user']}",
                 f"--password={MYSQL_CONFIG['password']}",
+                "--skip-ssl",
                 temp_db
             ] + tables_to_extract
             subprocess.run(mysqldump_cmd, stdout=output_file)
@@ -335,6 +354,15 @@ def create_template_database():
 def main():
     if len(sys.argv) > 1:
         if sys.argv[1] == '--watch':
+            logger.info("Starting Database Processor in WATCH mode...")
+            # First process any existing files
+            try:
+                processor = DatabaseProcessor()
+                processor.process_all_databases()
+            except Exception as e:
+                logger.error(f"Error processing existing files: {e}")
+            
+            # Then start watching
             watch_folder()
         elif sys.argv[1] == '--create-template':
             create_template_database()
