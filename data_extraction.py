@@ -16,8 +16,7 @@ def connect_to_db():
         password=os.environ.get("DB_PASSWORD", "root"),
         database=os.environ.get("DB_NAME", "ctc2data"),
         use_unicode=True, 
-        charset="utf8",
-        ssl_disabled=True
+        charset="utf8"
     )
 
 def get_sqlalchemy_engine():
@@ -27,8 +26,7 @@ def get_sqlalchemy_engine():
     host = os.environ.get("DB_HOST", "localhost")
     db = os.environ.get("DB_NAME", "ctc2data")
     return create_engine(
-        f"mysql+pymysql://{user}:{pwd}@{host}/{db}",
-        connect_args={'ssl_disabled': True}
+        f"mysql+pymysql://{user}:{pwd}@{host}/{db}"
     )
 
 def get_facility_info(engine):
@@ -97,20 +95,22 @@ def process_tb_screening(engine, facility_info):
     patients = pd.read_sql("SELECT PatientID, DateOfBirth, Sex FROM tblpatients", engine)
     
     # Get visit data with TB and ARV status
+    # Use LEFT JOIN to include visits even if some reference data is missing
     visits_query = """
     SELECT 
         v.PatientID, p.DateOfBirth, p.Sex, v.VisitDate, v.VisitTypeCode,
         tb.TBStatusDescription, arv.ARVStatusDescription
     FROM 
         tblvisits v
-    JOIN 
+    LEFT JOIN 
         tblpatients p ON v.PatientID = p.PatientID
-    JOIN 
+    LEFT JOIN 
         tblsetuptbstatus tb ON v.TBStatusCode = tb.TBStatusCode
-    JOIN 
+    LEFT JOIN 
         tblsetuparvstatuscodes arv ON v.ARVStatusCode = arv.ARVStatusCode
     """
     visits = pd.read_sql(visits_query, engine)
+    print(f"Loaded {len(visits)} visits")
     
     # Get medication data
     med_query = """
@@ -122,9 +122,18 @@ def process_tb_screening(engine, facility_info):
         DrugTypeID IN ('IPT', 'FLU', 'TPT')
     """
     medications = pd.read_sql(med_query, engine)
+    print(f"Loaded {len(medications)} medication records")
+    
+    # Ensure VisitDate is datetime in both dataframes to avoid merge errors
+    if not visits.empty:
+        visits['VisitDate'] = pd.to_datetime(visits['VisitDate'], errors='coerce')
+    
+    if not medications.empty:
+        medications['VisitDate'] = pd.to_datetime(medications['VisitDate'], errors='coerce')
     
     # Merge data
     data_combined = pd.merge(visits, medications, how='left', on=['PatientID', 'VisitDate'])
+    print(f"Combined data has {len(data_combined)} rows")
     
     # Process dates and calculate age
     data_combined['Date'] = pd.to_datetime(data_combined['VisitDate'], errors='coerce')
@@ -132,9 +141,16 @@ def process_tb_screening(engine, facility_info):
     data_combined.drop('Date', axis=1, inplace=True)
     
     today = datetime.today()
-    data_combined['Age'] = data_combined['DateOfBirth'].apply(
-        lambda x: today.year - x.year - ((today.month, today.day) < (x.month, x.day))
-    )
+    
+    def calculate_age(dob):
+        if pd.isnull(dob):
+            return None
+        try:
+            return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        except:
+            return None
+
+    data_combined['Age'] = data_combined['DateOfBirth'].apply(calculate_age)
     
     # Add facility information
     data_combined = add_facility_info(data_combined, facility_info)
@@ -190,6 +206,7 @@ def process_retention(engine, facility_info, facility_name):
         try:
             # Read data
             df = pd.read_sql(f"SELECT * FROM {table_name}", engine)
+            print(f"Loaded {len(df)} rows from {table_name}")
             
             # Add facility information
             df = add_facility_info(df, facility_info)
@@ -222,6 +239,20 @@ def main():
         facility_info = get_facility_info(engine)
         if facility_info.empty:
             print("Error: No facility information found in the database. Ensure tblconfig is populated.")
+            try:
+                # Debug info
+                tables = pd.read_sql("SHOW TABLES", engine)
+                print(f"Tables in database: {tables.values.flatten().tolist()}")
+                
+                # Check if tblconfig exists and has data
+                if 'tblconfig' in tables.values.flatten().tolist():
+                    count = pd.read_sql("SELECT count(*) FROM tblconfig", engine).iloc[0,0]
+                    print(f"tblconfig has {count} rows")
+                else:
+                    print("tblconfig table does not exist")
+            except Exception as e:
+                print(f"Error inspecting DB: {e}")
+                
             import sys
             sys.exit(1)
         

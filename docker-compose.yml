@@ -26,7 +26,7 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ~/Documents/Datasets/data:/data
+      - ./data:/data
     environment:
       - DB_HOST=db
       - DB_USER=root

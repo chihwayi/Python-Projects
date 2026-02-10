@@ -5,3 +5,5 @@ hiv
 database_processing.log
 *.txt
 .DS_Store
+data/
+

@@ -26,7 +26,13 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 DATABASE_FOLDER = os.path.join(DATA_DIR, "databases")
 PROCESSED_FOLDER = os.path.join(DATA_DIR, "processed_databases")
 BACKUP_FOLDER = os.path.join(DATA_DIR, "backup_databases")
-TEMPLATE_DATABASE = os.path.join(DATA_DIR, "template_database/blank.sql")
+# Use local template.sql if available (baked into container), otherwise fall back to data dir
+LOCAL_TEMPLATE = "template.sql"
+if Path(LOCAL_TEMPLATE).exists():
+    TEMPLATE_DATABASE = str(Path(LOCAL_TEMPLATE).absolute())
+else:
+    TEMPLATE_DATABASE = os.path.join(DATA_DIR, "template_database/blank.sql")
+
 ETL_SCRIPT_PATH = "data_extraction.py"  # script in the same directory
 
 MYSQL_CONFIG = {
@@ -39,12 +45,28 @@ MYSQL_CONFIG = {
 class DatabaseProcessor:
     def __init__(self):
         self.create_folders()
-        # Check if template database exists, but don't crash immediately if we are just setting up
-        # We'll log a warning instead, as the user might create it later
+        # Check if template database exists
         if not Path(TEMPLATE_DATABASE).exists():
             logger.warning(f"Template database not found at {TEMPLATE_DATABASE}")
-            # Ensure the directory exists at least
-            Path(TEMPLATE_DATABASE).parent.mkdir(parents=True, exist_ok=True)
+            # Ensure the directory exists at least if it's in the data dir
+            if TEMPLATE_DATABASE.startswith(DATA_DIR):
+                Path(TEMPLATE_DATABASE).parent.mkdir(parents=True, exist_ok=True)
+            
+    def copy_file_robust(self, src, dst):
+        """Robust file copy using shutil.copyfile and retries."""
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                # Use shutil.copyfile which is pure python
+                shutil.copyfile(src, dst)
+                return True
+            except Exception as e:
+                if i == max_retries - 1:
+                    logger.error(f"Failed to copy {src} to {dst} after {max_retries} attempts: {e}")
+                    return False
+                logger.warning(f"Copy failed (attempt {i+1}/{max_retries}), retrying: {e}")
+                time.sleep(1)
+        return False
     
     def create_folders(self):
         """Create necessary folders if they don't exist."""
@@ -103,8 +125,7 @@ class DatabaseProcessor:
             conn = mysql.connector.connect(
                 host=MYSQL_CONFIG["host"],
                 user=MYSQL_CONFIG["user"],
-                password=MYSQL_CONFIG["password"],
-                ssl_disabled=True
+                password=MYSQL_CONFIG["password"]
             )
             cursor = conn.cursor()
             
@@ -116,30 +137,55 @@ class DatabaseProcessor:
             cursor.close()
             conn.close()
             
-            # Now load the template database using a file redirection approach that handles spaces
+            # Now load the template database
             if Path(TEMPLATE_DATABASE).exists():
-                with open(TEMPLATE_DATABASE, 'r') as template_file:
+                try:
+                    # If template is local, we don't need to copy it to tmp unless we want to
+                    # But if it's the one in /app/template.sql, reading it is safe (no deadlock)
+                    # However, if we fallback to /data/..., we should copy.
+                    
+                    if TEMPLATE_DATABASE.startswith("/app") or not TEMPLATE_DATABASE.startswith("/data"):
+                        # Local file, just read it
+                        with open(TEMPLATE_DATABASE, 'r') as f:
+                            template_content = f.read()
+                    else:
+                        # Mounted file, use robust copy
+                        temp_template = Path("/tmp/temp_template.sql")
+                        if not self.copy_file_robust(TEMPLATE_DATABASE, temp_template):
+                            logger.error("Failed to copy template database to temp location")
+                            return False
+                        
+                        with open(temp_template, 'r') as f:
+                            template_content = f.read()
+                        
+                        # Clean up temp file
+                        if temp_template.exists():
+                            temp_template.unlink()
+                        
                     mysql_cmd = [
                         'mysql',
                         f"--host={MYSQL_CONFIG['host']}",
                         f"--user={MYSQL_CONFIG['user']}",
                         f"--password={MYSQL_CONFIG['password']}",
-                        "--skip-ssl",
+                        "--skip-ssl-verify-server-cert",
                         MYSQL_CONFIG['database']
                     ]
                     
                     result = subprocess.run(
                         mysql_cmd,
-                        stdin=template_file,
+                        input=template_content,
                         capture_output=True,
                         text=True
                     )
-                
-                if result.returncode != 0:
-                    logger.error(f"Failed to load template database: {result.stderr}")
-                    return False
                     
-                logger.info("Template database loaded successfully")
+                    if result.returncode != 0:
+                        logger.error(f"Failed to load template database: {result.stderr}")
+                        return False
+                        
+                    logger.info("Template database loaded successfully")
+                except Exception as e:
+                    logger.error(f"Error reading template database file: {e}")
+                    return False
             else:
                 logger.warning("Template database file not found. Proceeding with empty database.")
                 
@@ -159,23 +205,47 @@ class DatabaseProcessor:
             file_extension = db_path.suffix.lower()
             
             if file_extension == '.sql':
-                # For SQL dumps - use file objects instead of shell redirection to handle spaces
-                with open(db_path, 'r') as db_file:
+                # For SQL dumps - use temp file copy to avoid file locking issues
+                try:
+                    # Copy to /tmp first using system cp with retries
+                    temp_db = Path("/tmp/temp_db.sql")
+                    if not self.copy_file_robust(db_path, temp_db):
+                        logger.error(f"Failed to copy database {db_path} to temp location")
+                        return False
+                    
+                    with open(temp_db, 'r', encoding='utf-8', errors='ignore') as f:
+                        db_content = f.read()
+                        
+                    # Fix MySQL 8.0+ / MariaDB compatibility issues
+                    # Remove NO_AUTO_CREATE_USER which was removed in newer versions
+                    if "NO_AUTO_CREATE_USER" in db_content:
+                        logger.info("Removing incompatible NO_AUTO_CREATE_USER from sql_mode")
+                        db_content = db_content.replace("NO_AUTO_CREATE_USER,", "")
+                        db_content = db_content.replace(",NO_AUTO_CREATE_USER", "")
+                        db_content = db_content.replace("NO_AUTO_CREATE_USER", "")
+                        
+                    # Clean up temp file
+                    if temp_db.exists():
+                        temp_db.unlink()
+                        
                     mysql_cmd = [
                         'mysql',
                         f"--host={MYSQL_CONFIG['host']}",
                         f"--user={MYSQL_CONFIG['user']}",
                         f"--password={MYSQL_CONFIG['password']}",
-                        "--skip-ssl",
+                        "--skip-ssl-verify-server-cert",
                         MYSQL_CONFIG['database']
                     ]
                     
                     result = subprocess.run(
                         mysql_cmd,
-                        stdin=db_file,
+                        input=db_content,
                         capture_output=True,
                         text=True
                     )
+                except Exception as e:
+                    logger.error(f"Error reading database file {db_path}: {e}")
+                    return False
                 
             elif file_extension in ['.csv', '.xlsx', '.xls', '.dta']:
                 # These are likely output files or data files, not database dumps
@@ -211,6 +281,8 @@ class DatabaseProcessor:
             
             if result.returncode != 0:
                 logger.error(f"ETL script failed with error: {result.stderr}")
+                if result.stdout:
+                    logger.error(f"ETL script stdout: {result.stdout}")
                 return False
                 
             logger.info(f"ETL output: {result.stdout}")
@@ -290,8 +362,7 @@ def create_template_database():
     conn = mysql.connector.connect(
         host=MYSQL_CONFIG["host"],
         user=MYSQL_CONFIG["user"],
-        password=MYSQL_CONFIG["password"],
-        ssl_disabled=True
+        password=MYSQL_CONFIG["password"]
     )
     cursor = conn.cursor()
     
