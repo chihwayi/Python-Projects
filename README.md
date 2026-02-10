@@ -16,8 +16,14 @@ This system automatically processes SQL database dumps (e.g., from EPMS), extrac
 
 ## Usage
 
-### Automatic Processing
-The system runs in the background and watches for new files.
+### 1. Start the Application
+The system does not start automatically. You must start it manually when you want to process data:
+```bash
+docker-compose up -d
+```
+
+### 2. Automatic Processing
+Once running, the system watches for new files.
 
 1. **Input:** Copy or move your `.sql` database backup files into:
    `~/Documents/Datasets/data/databases`
@@ -32,10 +38,14 @@ The system runs in the background and watches for new files.
    - **TB Screening Data (CSV):** `~/Documents/Datasets/data/tb screening/`
    - **Retention Data (Stata .dta):** `~/Documents/Datasets/data/retention/<Facility Name>/`
 
+### 3. Stop the Application
+When you are done, stop the containers to free up resources:
+```bash
+docker-compose down
+```
+
 ### Manual Control
-- **Start Services:** `docker-compose up -d`
 - **View Logs:** `docker-compose logs -f processor`
-- **Stop Services:** `docker-compose down`
 
 ## Troubleshooting
 - **Logs:** If a file isn't processing, check the logs: `docker-compose logs -f processor`
